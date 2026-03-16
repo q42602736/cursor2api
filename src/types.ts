@@ -11,6 +11,7 @@ export interface AnthropicRequest {
     temperature?: number;
     top_p?: number;
     stop_sequences?: string[];
+    thinking?: { type: 'enabled' | 'disabled'; budget_tokens?: number };
 }
 
 /** tool_choice 控制模型是否必须调用工具
@@ -104,12 +105,14 @@ export interface AppConfig {
     timeout: number;
     proxy?: string;
     cursorModel: string;
+    authTokens?: string[];  // API 鉴权 token 列表，为空则不鉴权
     vision?: {
         enabled: boolean;
         mode: 'ocr' | 'api';
         baseUrl: string;
         apiKey: string;
         model: string;
+        proxy?: string;  // vision 独立代理（不影响 Cursor API 直连）
     };
     fingerprint: {
         userAgent: string;

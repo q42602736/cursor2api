@@ -25,6 +25,18 @@ import { fixToolCallArguments } from './tool-fixer.js';
 
 // ==================== 工具指令构建 ====================
 
+// 已知工具名 — 无需额外描述（模型已从 few-shot 和训练中了解）
+const WELL_KNOWN_TOOLS = new Set([
+    'Read', 'read_file', 'ReadFile',
+    'Write', 'write_file', 'WriteFile', 'write_to_file',
+    'Edit', 'edit_file', 'EditFile', 'replace_in_file',
+    'Bash', 'execute_command', 'RunCommand', 'run_command',
+    'ListDir', 'list_dir', 'list_files',
+    'Search', 'search_files', 'grep_search', 'codebase_search',
+    'attempt_completion', 'ask_followup_question',
+    'AskFollowupQuestion', 'AttemptCompletion',
+]);
+
 /**
  * 将 JSON Schema 压缩为紧凑的类型签名
  * 目的：90 个工具的完整 JSON Schema 约 135,000 chars，压缩后约 15,000 chars
@@ -75,10 +87,12 @@ function buildToolInstructions(
     const toolList = tools.map((tool) => {
         // ★ 使用紧凑 Schema 替代完整 JSON Schema 以大幅减小输入体积
         const schema = tool.input_schema ? compactSchema(tool.input_schema) : '{}';
-        // 截断过长的工具描述（部分客户端的工具描述可达数千字符）
-        // ★ 80 chars 足矣：Schema 已包含参数信息，短描述减少输入体积，为输出留更多空间
-        const desc = (tool.description || 'No description').substring(0, 80);
-        return `- **${tool.name}**: ${desc}\n  Params: ${schema}`;
+        // ★ 已知工具跳过描述（模型已经知道它们做什么），减少 ~30% 输入
+        const isKnown = WELL_KNOWN_TOOLS.has(tool.name);
+        const desc = isKnown ? '' : (tool.description || '').substring(0, 50);
+        // Markdown 文档格式：更自然，不像 API spec
+        const paramStr = schema ? `\n  Params: {${schema}}` : '';
+        return desc ? `- **${tool.name}**: ${desc}${paramStr}` : `- **${tool.name}**${paramStr}`;
     }).join('\n');
 
     // ★ tool_choice 强制约束
@@ -130,6 +144,19 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
     // ★ 图片预处理：在协议转换之前，检测并处理 Anthropic 格式的 ImageBlockParam
     await preprocessImages(req.messages);
 
+    // ★ 预估原始上下文大小，驱动动态工具结果预算
+    let estimatedContextChars = 0;
+    if (req.system) {
+        estimatedContextChars += typeof req.system === 'string' ? req.system.length : JSON.stringify(req.system).length;
+    }
+    for (const msg of req.messages ?? []) {
+        estimatedContextChars += typeof msg.content === 'string' ? msg.content.length : JSON.stringify(msg.content).length;
+    }
+    if (req.tools && req.tools.length > 0) {
+        estimatedContextChars += req.tools.length * 150; // 压缩后每个工具约 150 chars
+    }
+    setCurrentContextChars(estimatedContextChars);
+
     const messages: CursorMessage[] = [];
     const hasTools = req.tools && req.tools.length > 0;
 
@@ -140,6 +167,19 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         else if (Array.isArray(req.system)) {
             combinedSystem = req.system.filter(b => b.type === 'text').map(b => b.text).join('\n');
         }
+    }
+
+    // ★ 计费头清除：x-anthropic-billing-header 会被模型判定为恶意伪造并触发注入警告
+    if (combinedSystem) {
+        combinedSystem = combinedSystem.replace(/^x-anthropic-billing-header[^\n]*$/gim, '');
+        combinedSystem = combinedSystem.replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    // ★ Thinking 提示注入：当客户端请求 thinking 时，引导模型使用 <thinking> 标签
+    if (req.thinking?.type === 'enabled') {
+        const thinkingHint = '\n\nBefore responding, think through the problem step by step inside <thinking>...</thinking> tags. Your thinking will be extracted and returned separately. After thinking, provide your actual response outside the tags.';
+        combinedSystem = (combinedSystem || '') + thinkingHint;
+        console.log(`[Converter] Thinking 模式已启用 (budget=${req.thinking.budget_tokens ?? 'auto'})`);
     }
 
     if (hasTools) {
@@ -316,6 +356,8 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
         totalChars += textLen;
         console.log(`[Converter]   cursor_msg[${i}] role=${m.role} chars=${textLen}${i < 2 ? ' (few-shot)' : ''}`);
     }
+    // 更新动态预算的上下文字符数（用实际 Cursor 消息计算值覆盖之前的估算值）
+    setCurrentContextChars(totalChars);
     console.log(`[Converter] 总消息数=${messages.length}, 总字符=${totalChars}`);
 
     return {
@@ -326,9 +368,19 @@ export async function convertToCursorRequest(req: AnthropicRequest): Promise<Cur
     };
 }
 
-// 最大工具结果长度（超过则截断，防止上下文溢出）
-// ★ 15000 chars 平衡点：保留足够信息让模型理解结果，同时为输出留空间
-const MAX_TOOL_RESULT_LENGTH = 15000;
+// ★ 动态工具结果预算（替代固定 15000）
+// Cursor API 的输出预算与输入大小成反比，固定 15K 在大上下文下严重挤压输出空间
+function getToolResultBudget(totalContextChars: number): number {
+    if (totalContextChars > 100000) return 4000;   // 超大上下文：极度压缩
+    if (totalContextChars > 60000) return 6000;    // 大上下文：适度压缩
+    if (totalContextChars > 30000) return 10000;   // 中等上下文：温和压缩
+    return 15000;                                   // 小上下文：保留完整信息
+}
+
+// 当前上下文字符计数（在 convertToCursorRequest 中更新）
+let _currentContextChars = 0;
+export function setCurrentContextChars(chars: number): void { _currentContextChars = chars; }
+function getCurrentToolResultBudget(): number { return getToolResultBudget(_currentContextChars); }
 
 
 
@@ -363,11 +415,12 @@ function extractToolResultNatural(msg: AnthropicMessage): string {
                 continue;
             }
 
-            // 截断过长结果
-            if (resultText.length > MAX_TOOL_RESULT_LENGTH) {
-                const truncated = resultText.slice(0, MAX_TOOL_RESULT_LENGTH);
-                resultText = truncated + `\n\n... (truncated, ${resultText.length} chars total)`;
-                console.log(`[Converter] 截断工具结果: ${resultText.length} → ${MAX_TOOL_RESULT_LENGTH} chars`);
+            // ★ 动态截断：根据当前上下文大小计算预算
+            const budget = getCurrentToolResultBudget();
+            if (resultText.length > budget) {
+                const truncated = resultText.slice(0, budget);
+                resultText = truncated + `\n\n... (truncated, ${resultText.length} → ${budget} chars, context=${_currentContextChars})`;
+                console.log(`[Converter] 截断工具结果: ${resultText.length} → ${budget} chars (上下文=${_currentContextChars})`);
             }
 
             if (block.is_error) {

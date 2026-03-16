@@ -1,5 +1,64 @@
 # Changelog
 
+## v2.7.0 (2026-03-16)
+
+### 🔐 API Token 鉴权
+
+- **公网部署安全**：新增 `auth_tokens` 配置项，支持 Bearer token 鉴权
+- 支持多 token（数组格式）、环境变量 `AUTH_TOKEN`、`x-api-key` 头
+- 未配置时全部放行（向后兼容），GET 请求和 /health 端点无需鉴权
+- 启动 banner 显示鉴权状态
+
+### 🧠 Thinking 支持（客户端驱动）
+
+- **Anthropic 协议**：请求体传 `thinking.type = "enabled"` 即启用
+- **OpenAI 协议**：模型名含 `thinking` 或传 `reasoning_effort` 参数即启用
+- 系统提示词注入 `<thinking>` 引导，模型输出自动提取
+- Anthropic 返回 `thinking` content block，OpenAI 返回 `reasoning_content` 字段
+- 提取在拒绝检测之前执行，防止 thinking 内容触发误判
+- 未启用时仍会剥离 thinking 标签（防误判），但内容不返回
+
+### 🔧 已知工具跳过描述
+
+- `WELL_KNOWN_TOOLS` 集合中的 17 个常用工具（Read、Write、Bash 等）不再生成描述文本
+- 减少约 30% 工具指令输入，节省上下文空间
+
+### 📊 动态工具结果预算
+
+- `getToolResultBudget()` 替代固定 15K 限制
+- 根据当前上下文大小动态调整：小上下文 20K → 大上下文 8K
+- `setCurrentContextChars()` 跟踪实际上下文字符数
+
+### 🛡️ isTruncated 重写
+
+- 重新实现截断检测逻辑，正确处理工具调用 JSON 中的反引号
+- 优先检查 `` ```json action`` 代码块，避免 JSON 字符串值内的反引号导致误判
+- 消除因误判导致的无限重试
+
+### 📦 response_format 支持
+
+- `OpenAIChatRequest` 新增 `response_format` 字段（`json_object` / `json_schema`）
+- JSON 格式请求自动追加格式指令到最后一条用户消息
+- `stripMarkdownJsonWrapper()` 自动剥离响应中的 markdown 代码块包装
+- 流式和非流式路径均支持
+
+### 🧹 计费头清除
+
+- 自动清除系统提示词中的 `x-anthropic-billing-header`
+- 防止模型将其判定为恶意伪造并触发注入警告
+
+### 🌐 Vision 独立代理
+
+- 新增 `vision.proxy` 配置项，图片分析 API 单独走代理
+- Cursor API 保持直连（国内可用），不因代理影响响应速度
+- 未配置时回退到全局 `proxy`
+
+### 🛡️ 新增拒绝模式
+
+- 补充 4 个 Cursor 新拒绝措辞：`isn't something I can help with`、`not something I can help with`、`scoped to answering questions about Cursor`、`falls outside`
+
+---
+
 ## v2.5.6 (2026-03-12)
 
 ### 🗜️ 渐进式历史压缩

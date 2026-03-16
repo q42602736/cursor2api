@@ -62,6 +62,11 @@ const REFUSAL_PATTERNS = [
     /appears\s+to\s+be\s+(?:asking|about)\s+.*?unrelated/i,
     /(?:not|isn't|is\s+not)\s+(?:related|relevant)\s+to\s+(?:programming|coding|software)/i,
     /I\s+can\s+help\s+(?:you\s+)?with\s+things\s+like/i,
+    // New Cursor refusal phrases (2026-03)
+    /isn't\s+something\s+I\s+can\s+help\s+with/i,
+    /not\s+something\s+I\s+can\s+help\s+with/i,
+    /scoped\s+to\s+answering\s+questions\s+about\s+Cursor/i,
+    /falls\s+outside\s+(?:the\s+scope|what\s+I)/i,
     // Prompt injection / social engineering detection (new failure mode)
     /prompt\s+injection\s+attack/i,
     /prompt\s+injection/i,
@@ -424,13 +429,24 @@ export async function handleMessages(req: Request, res: Response): Promise<void>
 export function isTruncated(text: string): boolean {
     if (!text || text.trim().length === 0) return false;
     const trimmed = text.trimEnd();
-    // 代码块未闭合
-    const codeBlockOpen = (trimmed.match(/```/g) || []).length % 2 !== 0;
-    if (codeBlockOpen) return true;
-    // 检测 ```json action 块已开始但 JSON 对象未闭合（截断发生在工具调用参数中间）
-    const jsonActionBlocks = trimmed.match(/```json\s+action[\s\S]*?```/g) || [];
+
+    // ★ 核心检测：```json action 块是否未闭合（截断发生在工具调用参数中间）
+    // 这是最精确的截断检测 — 只关心实际的工具调用代码块
+    // 注意：不能简单计数所有 ``` 因为 JSON 字符串值里可能包含 markdown 反引号
     const jsonActionOpens = (trimmed.match(/```json\s+action/g) || []).length;
-    if (jsonActionOpens > jsonActionBlocks.length) return true;
+    if (jsonActionOpens > 0) {
+        // 从工具调用的角度检测：开始标记比闭合标记多 = 截断
+        const jsonActionBlocks = trimmed.match(/```json\s+action[\s\S]*?```/g) || [];
+        if (jsonActionOpens > jsonActionBlocks.length) return true;
+        // 所有 action 块都闭合了 = 没截断（即使响应文本被截断，工具调用是完整的）
+        return false;
+    }
+
+    // 无工具调用时的通用截断检测（纯文本响应）
+    // 代码块未闭合：只检测行首的代码块标记，避免 JSON 值中的反引号误判
+    const lineStartCodeBlocks = (trimmed.match(/^```/gm) || []).length;
+    if (lineStartCodeBlocks % 2 !== 0) return true;
+
     // XML/HTML 标签未闭合 (Cursor 有时在中途截断)
     const openTags = (trimmed.match(/^<[a-zA-Z]/gm) || []).length;
     const closeTags = (trimmed.match(/^<\/[a-zA-Z]/gm) || []).length;
@@ -603,6 +619,18 @@ async function handleStream(res: Response, cursorReq: CursorChatRequest, body: A
 
         console.log(`[Handler] 原始响应 (${fullResponse.length} chars, tools=${hasTools}): ${fullResponse.substring(0, 200)}${fullResponse.length > 200 ? '...' : ''}`);
 
+        // ★ Thinking 提取（在拒绝检测之前，防止 thinking 内容触发 isRefusal 误判）
+        const thinkingEnabled = body.thinking?.type === 'enabled';
+        let thinkingContent = '';
+        if (fullResponse.includes('<thinking>')) {
+            const thinkingMatch = fullResponse.match(/<thinking>([\s\S]*?)<\/thinking>/g);
+            if (thinkingMatch) {
+                thinkingContent = thinkingMatch.map(m => m.replace(/<\/?thinking>/g, '').trim()).join('\n\n');
+                fullResponse = fullResponse.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim();
+                console.log(`[Handler] 剥离 thinking: ${thinkingContent.length} chars, 剩余 ${fullResponse.length} chars`);
+            }
+        }
+
         // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
         const shouldRetryRefusal = () => {
             if (!isRefusal(fullResponse)) return false;
@@ -722,6 +750,22 @@ Continue EXACTLY from where you stopped. DO NOT repeat any content already gener
         let stopReason = (hasTools && isTruncated(fullResponse)) ? 'max_tokens' : 'end_turn';
         if (stopReason === 'max_tokens') {
             console.log(`[Handler] ⚠️ ${MAX_AUTO_CONTINUE}次隐式续写后仍受限于截断 (${fullResponse.length} chars)，设置 stop_reason=max_tokens`);
+        }
+
+        // ★ Thinking 块发送：在实际内容之前发送 thinking content block
+        if (thinkingEnabled && thinkingContent) {
+            writeSSE(res, 'content_block_start', {
+                type: 'content_block_start', index: blockIndex,
+                content_block: { type: 'thinking', thinking: '' },
+            });
+            writeSSE(res, 'content_block_delta', {
+                type: 'content_block_delta', index: blockIndex,
+                delta: { type: 'thinking_delta', thinking: thinkingContent },
+            });
+            writeSSE(res, 'content_block_stop', {
+                type: 'content_block_stop', index: blockIndex,
+            });
+            blockIndex++;
         }
 
         if (hasTools) {
@@ -910,6 +954,18 @@ async function handleNonStream(res: Response, cursorReq: CursorChatRequest, body
 
     console.log(`[Handler] 非流式原始响应 (${fullText.length} chars, tools=${hasTools}): ${fullText.substring(0, 300)}${fullText.length > 300 ? '...' : ''}`);
 
+    // ★ Thinking 提取（在拒绝检测之前）
+    const thinkingEnabled = body.thinking?.type === 'enabled';
+    let thinkingContent = '';
+    if (fullText.includes('<thinking>')) {
+        const thinkingMatch = fullText.match(/<thinking>([\s\S]*?)<\/thinking>/g);
+        if (thinkingMatch) {
+            thinkingContent = thinkingMatch.map(m => m.replace(/<\/?thinking>/g, '').trim()).join('\n\n');
+            fullText = fullText.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim();
+            console.log(`[Handler] 非流式：剥离 thinking: ${thinkingContent.length} chars, 剩余 ${fullText.length} chars`);
+        }
+    }
+
     // 拒绝检测 + 自动重试（工具模式和非工具模式均生效）
     const shouldRetry = () => isRefusal(fullText) && !(hasTools && hasToolCalls(fullText));
 
@@ -1008,6 +1064,12 @@ Continue EXACTLY from where you stopped. DO NOT repeat any content already gener
     }
 
     const contentBlocks: AnthropicContentBlock[] = [];
+
+    // ★ Thinking 内容作为第一个 content block
+    if (thinkingEnabled && thinkingContent) {
+        contentBlocks.push({ type: 'thinking' as any, thinking: thinkingContent } as any);
+    }
+
     // ★ 截断检测：代码块/XML 未闭合时，返回 max_tokens 让 Claude Code 自动继续
     let stopReason = (hasTools && isTruncated(fullText)) ? 'max_tokens' : 'end_turn';
     if (stopReason === 'max_tokens') {

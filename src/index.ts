@@ -35,6 +35,30 @@ app.use((_req, res, next) => {
     next();
 });
 
+// ★ API 鉴权中间件：配置了 authTokens 则需要 Bearer token
+app.use((req, res, next) => {
+    // 跳过无需鉴权的路径
+    if (req.method === 'GET' || req.path === '/health') {
+        return next();
+    }
+    const tokens = config.authTokens;
+    if (!tokens || tokens.length === 0) {
+        return next(); // 未配置 token 则全部放行
+    }
+    const authHeader = req.headers['authorization'] || req.headers['x-api-key'];
+    if (!authHeader) {
+        res.status(401).json({ error: { message: 'Missing authentication token. Use Authorization: Bearer <token>', type: 'auth_error' } });
+        return;
+    }
+    const token = String(authHeader).replace(/^Bearer\s+/i, '').trim();
+    if (!tokens.includes(token)) {
+        console.log(`[Auth] 拒绝无效 token: ${token.substring(0, 8)}...`);
+        res.status(403).json({ error: { message: 'Invalid authentication token', type: 'auth_error' } });
+        return;
+    }
+    next();
+});
+
 // ==================== 路由 ====================
 
 // Anthropic Messages API
@@ -91,6 +115,7 @@ app.listen(config.port, () => {
     console.log('  ╠══════════════════════════════════════╣');
     console.log(`  ║  Server:  http://localhost:${config.port}      ║`);
     console.log('  ║  Model:   ' + config.cursorModel.padEnd(26) + '║');
+    console.log('  ║  Auth:    ' + (config.authTokens?.length ? `${config.authTokens.length} token(s)` : 'OPEN (no auth)').padEnd(26) + '║');
     console.log('  ╠══════════════════════════════════════╣');
     console.log('  ║  API Endpoints:                      ║');
     console.log('  ║  • Anthropic: /v1/messages            ║');

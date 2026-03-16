@@ -6,10 +6,21 @@ port: 3010
 # 请求超时（秒）
 timeout: 120
 
-# 代理设置（可选）
+# ==================== API 鉴权（推荐公网部署时开启） ====================
+# 配置后所有 POST 请求必须携带 Bearer token 才能访问
+# 客户端使用方式：Authorization: Bearer <token> 或 x-api-key: <token>
+# 支持多个 token（数组格式），不配置则全部放行
+# 环境变量: AUTH_TOKEN=token1,token2 (逗号分隔)
+# auth_tokens:
+#   - "sk-your-secret-token-1"
+#   - "sk-your-secret-token-2"
+
+# ==================== 代理设置 ====================
+# 全局代理（可选）
 # ⚠️ Node.js fetch 不读取 HTTP_PROXY / HTTPS_PROXY 环境变量，
 #    必须在此处或通过 PROXY 环境变量显式配置代理。
 # 支持 http 代理，含认证格式: http://用户名:密码@代理地址:端口
+# 💡 国内可直连 Cursor API，通常不需要配置全局代理
 # proxy: "http://127.0.0.1:7890"
 
 # Cursor 使用的模型
@@ -19,16 +30,22 @@ cursor_model: "anthropic/claude-sonnet-4.6"
 fingerprint:
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
-# 视觉处理降级配置（可选）
+# ==================== 视觉处理降级配置（可选） ====================
 # 如果开启，可以拦截您发给大模型的图片进行降级处理（因为目前免费 Cursor 不支持视觉）。
 vision:
   enabled: true
   # mode 选项: 'ocr' 或 'api'
   # 'ocr': [默认模式] 彻底免 Key，零配置，完全依赖本机的 CPU 识图，提取文本、报错日志、代码段后发给大模型。
-  # 'api': 需要配置下方的 baseUrl 和 apiKey，把图发给外部视觉模型（如 Gemini、OpenRouter），能“看到”画面内容和色彩。
+  # 'api': 需要配置下方的 baseUrl 和 apiKey，把图发给外部视觉模型（如 Gemini、OpenRouter），能"看到"画面内容和色彩。
   mode: 'ocr'
   
   # ---------- 以下选项仅在 mode: 'api' 时才生效 ----------
   # base_url: "https://openrouter.ai/api/v1/chat/completions"
   # api_key: "sk-or-v1-..."
   # model: "meta-llama/llama-3.2-11b-vision-instruct:free"
+  
+  # Vision 独立代理（可选）
+  # 💡 Cursor API 国内可直连无需代理，但图片分析 API（OpenAI/OpenRouter）可能需要
+  #    配置此项后只有图片 API 走代理，不影响主请求的响应速度
+  #    如果不配，会回退到上面的全局 proxy（如果有的话）
+  # proxy: "http://127.0.0.1:7890"

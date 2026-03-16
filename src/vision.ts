@@ -1,6 +1,6 @@
 import { getConfig } from './config.js';
 import type { AnthropicMessage, AnthropicContentBlock } from './types.js';
-import { getProxyFetchOptions } from './proxy-agent.js';
+import { getVisionProxyFetchOptions } from './proxy-agent.js';
 import { createWorker } from 'tesseract.js';
 
 export async function applyVisionInterceptor(messages: AnthropicMessage[]): Promise<void> {
@@ -123,7 +123,7 @@ async function callVisionAPI(imageBlocks: AnthropicContentBlock[]): Promise<stri
             'Authorization': `Bearer ${config.apiKey}`
         },
         body: JSON.stringify(payload),
-        ...getProxyFetchOptions(),
+        ...getVisionProxyFetchOptions(),
     } as any);
 
     if (!res.ok) {

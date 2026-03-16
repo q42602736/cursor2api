@@ -31,12 +31,19 @@ export function getConfig(): AppConfig {
             }
             if (yaml.vision) {
                 config.vision = {
-                    enabled: yaml.vision.enabled !== false, // default to true if vision section exists in some way
+                    enabled: yaml.vision.enabled !== false,
                     mode: yaml.vision.mode || 'ocr',
                     baseUrl: yaml.vision.base_url || 'https://api.openai.com/v1/chat/completions',
                     apiKey: yaml.vision.api_key || '',
                     model: yaml.vision.model || 'gpt-4o-mini',
+                    proxy: yaml.vision.proxy || undefined,
                 };
+            }
+            // ★ API 鉴权 token
+            if (yaml.auth_tokens) {
+                config.authTokens = Array.isArray(yaml.auth_tokens)
+                    ? yaml.auth_tokens.map(String)
+                    : String(yaml.auth_tokens).split(',').map((s: string) => s.trim()).filter(Boolean);
             }
         } catch (e) {
             console.warn('[Config] 读取 config.yaml 失败:', e);
@@ -48,6 +55,9 @@ export function getConfig(): AppConfig {
     if (process.env.TIMEOUT) config.timeout = parseInt(process.env.TIMEOUT);
     if (process.env.PROXY) config.proxy = process.env.PROXY;
     if (process.env.CURSOR_MODEL) config.cursorModel = process.env.CURSOR_MODEL;
+    if (process.env.AUTH_TOKEN) {
+        config.authTokens = process.env.AUTH_TOKEN.split(',').map(s => s.trim()).filter(Boolean);
+    }
 
     // 从 base64 FP 环境变量解析指纹
     if (process.env.FP) {
