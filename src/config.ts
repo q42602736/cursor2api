@@ -12,7 +12,7 @@ export function getConfig(): AppConfig {
         port: 3010,
         timeout: 120,
         cursorModel: 'anthropic/claude-sonnet-4.6',
-        maxAutoContinue: 3,
+        maxAutoContinue: 2,
         maxHistoryMessages: 100,
         fingerprint: {
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
